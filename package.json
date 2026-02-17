@@ -1,9 +1,13 @@
 {
   "name": "tazkarti-backend-vercel",
   "version": "1.0.0",
-  "description": "Tazkarti events API for Vercel",
+  "description": "Tazkarti events API - fetches events dynamically from tazkarti.com",
   "main": "api/events/music.js",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.0.0",
+    "@sparticuz/chromium-min": "^138.0.0"
   }
 }
