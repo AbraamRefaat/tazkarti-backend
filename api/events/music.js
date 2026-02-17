@@ -24,7 +24,10 @@ function parsePrice(text) {
 
 function parseDateFromText(text) {
   if (!text || typeof text !== 'string') return null;
-  const d = new Date(text.trim());
+  let s = text.trim();
+  // Normalize "19-February 2026" -> "19 February 2026" for Date parsing
+  s = s.replace(/(\d{1,2})-(\w+)-(\d{2,4})/, '$1 $2 $3');
+  const d = new Date(s);
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
@@ -56,74 +59,133 @@ async function fetchEventsFromTazkarti() {
       timeout: 25000,
     });
 
-    // Wait for SPA to render event list
-    await delay(5000);
+    // Wait for SPA to render event list (tazkarti loads content via JS)
+    await delay(6000);
 
     const events = await page.evaluate((baseUrl) => {
       const result = [];
-      const seen = new Set();
+      const seenTitles = new Set();
 
-      // Try multiple strategies to find event links/cards
-      const selectors = [
-        'a[href*="/event/"]',
-        'a[href*="#/event/"]',
-        '[class*="event"] a[href]',
-        'a[href*="ticketor"][href*="event"]',
-      ];
+      // Strategy 1: Find cards that contain "Prices From" or "EGP" (event price line on tazkarti)
+      const pricePattern = /Prices?\s*From|^\s*\d+\s*EGP|\d+\s*ج\.م|EGP/i;
+      const datePattern = /\d{1,2}[-/]\w+[-/]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}|(?:يناير|فبراير|مارس|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)|February|January|March|April|May|June|July|August|September|October|November|December/i;
 
-      let links = [];
-      for (const sel of selectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          els.forEach((a) => {
-            const href = a.getAttribute('href') || '';
-            const fullUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
-            if (fullUrl.includes('event') && !seen.has(fullUrl)) {
-              seen.add(fullUrl);
-              links.push({ a, fullUrl });
-            }
-          });
-        } catch (_) {}
+      function getCardRoot(el) {
+        let node = el;
+        for (let i = 0; i < 15 && node; i++) {
+          const text = node.innerText || '';
+          const hasPrice = pricePattern.test(text);
+          const hasDate = datePattern.test(text);
+          if (hasPrice && hasDate && (text.length > 80 && text.length < 3000)) return node;
+          node = node.parentElement;
+        }
+        return null;
       }
 
-      // Dedupe by normalized event path
-      const byPath = new Map();
-      links.forEach(({ a, fullUrl }) => {
-        const path = fullUrl.replace(/#\/?/, '').replace(/\/$/, '');
-        if (byPath.has(path)) return;
-        byPath.set(path, { a, fullUrl });
+      // Collect all elements that contain price-like text
+      const allElements = document.querySelectorAll('*');
+      const cardRoots = new Set();
+      allElements.forEach((el) => {
+        const text = (el.innerText || '').trim();
+        if (text.length < 80 || text.length > 4000) return;
+        if (!pricePattern.test(text) || !datePattern.test(text)) return;
+        const root = getCardRoot(el);
+        if (root) cardRoots.add(root);
       });
 
-      byPath.forEach(({ a, fullUrl }) => {
-        const card = a.closest('div[class*="card"], div[class*="event"], li, article, [class*="item"]') || a.parentElement;
-        const text = (card ? card.innerText : a.innerText) || '';
-        const title = (a.textContent || '').trim() || text.split('\n')[0]?.trim() || 'Event';
-        const id = fullUrl.split('/event/')[1]?.split(/[#?/]/)[0] || `ev_${result.length}`;
+      cardRoots.forEach((card, idx) => {
+        const text = (card.innerText || '').trim();
+        const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
 
+        let title = '';
         let dateStr = null;
         let priceStr = null;
-        let locationStr = null;
-        const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
-        for (const line of lines) {
-          if (!dateStr && (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line) || /\d{4}-\d{2}-\d{2}/.test(line) || /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(line))) dateStr = line;
-          if (!priceStr && /(\d+\s*(?:egp|le|ج\.م|lb)|^\d+(?:\.\d+)?\s*$)/i.test(line)) priceStr = line;
-          if (!locationStr && line.length > 3 && line.length < 120 && !/^\d+$/.test(line) && line !== title) locationStr = line;
+        let locationStr = '';
+        let eventUrl = baseUrl + '/#/events/category/3';
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (/^\d+\s*EGP|Prices?\s*From\s*:\s*\d+|^\d+\s*ج\.م/i.test(line)) {
+            const numMatch = line.match(/(\d+(?:\.\d+)?)/);
+            if (numMatch) priceStr = numMatch[1];
+          }
+          if (datePattern.test(line) && !dateStr) dateStr = line.replace(/\s*\d+\s*EGP.*$/i, '').trim();
+          if (/Main Hall|Small Theatre|Theatre|Opera|Cairo|المسرح|دار الأوبرا/i.test(line) && line.length < 80) locationStr = line;
         }
 
+        // Prefer English title: usually first long line that isn't a date and isn't "Buy Tickets"
+        for (const line of lines) {
+          if (line.length < 10 || line.length > 180) continue;
+          if (/Buy Tickets|Clear Search|Search|Event Name|Event Category|Event date/i.test(line)) continue;
+          if (datePattern.test(line) && line.length < 30) continue;
+          if (/^\d+\s*EGP/i.test(line)) continue;
+          title = line;
+          break;
+        }
+        if (!title) title = lines[0] || 'Event';
+
+        // Get event link from same card if present
+        const link = card.querySelector('a[href*="event"], a[href*="ticket"], a[href*="#/"]');
+        if (link) {
+          const href = link.getAttribute('href') || '';
+          eventUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
+        }
+
+        const slug = (title + (dateStr || '') + locationStr).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+        const id = slug ? `tazkarti_${slug.substring(0, 40)}` : `tazkarti_${idx}`;
+        const titleKey = (title + (dateStr || '')).toLowerCase();
+        if (seenTitles.has(titleKey)) return;
+        seenTitles.add(titleKey);
+
         result.push({
-          id: id.replace(/[^a-zA-Z0-9_-]/g, '_') || `tazkarti_${result.length}`,
+          id,
           title: title.substring(0, 200),
           description: '',
           location: locationStr || '',
           startDate: dateStr || null,
           time: null,
           imageUrl: null,
-          eventUrl: fullUrl,
+          eventUrl,
           category: 'Music',
           price: priceStr,
           isBookmarked: false,
         });
       });
+
+      // Strategy 2: Fallback - any link with href containing event
+      if (result.length === 0) {
+        document.querySelectorAll('a[href*="event"], a[href*="#/"]').forEach((a) => {
+          const href = a.getAttribute('href') || '';
+          const fullUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
+          const card = a.closest('div, li, article') || a.parentElement;
+          const text = (card ? card.innerText : a.innerText) || '';
+          if (text.length < 30) return;
+          const title = (a.textContent || text.split('\n')[0] || 'Event').trim().substring(0, 200);
+          const titleKey = title.toLowerCase();
+          if (seenTitles.has(titleKey)) return;
+          seenTitles.add(titleKey);
+          let dateStr = null;
+          let priceStr = null;
+          const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
+          for (const line of lines) {
+            if (/\d{1,2}[-/]\w+[-/]\d{2,4}|\d+\s*(?:Jan|Feb|Mar|Feb|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(line)) dateStr = line;
+            if (/\d+\s*EGP|Prices?\s*From/i.test(line)) { const m = line.match(/(\d+)/); if (m) priceStr = m[1]; }
+          }
+          result.push({
+            id: `tazkarti_${result.length}`,
+            title,
+            description: '',
+            location: '',
+            startDate: dateStr,
+            time: null,
+            imageUrl: null,
+            eventUrl: fullUrl,
+            category: 'Music',
+            price: priceStr,
+            isBookmarked: false,
+          });
+        });
+      }
 
       return result;
     }, TAZKARTI_BASE);
