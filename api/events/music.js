@@ -124,8 +124,9 @@ async function fetchEventsFromTazkarti() {
           break;
         }
         if (!title) title = lines[0] || 'Event';
-        // Skip cards that are clearly nav/header (not real event titles)
-        if (/^STADIUM\s*LOCATIONS$/i.test(title) || /^Cairo\s*Opera\s*House$/i.test(title)) return;
+        // Only keep real events: tazkarti event titles include the date (e.g. "Concert 19-February 2026")
+        const titleHasDate = /\d{1,2}[-/]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*[-/]?\s*\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}/i.test(title);
+        if (!titleHasDate) return;
 
         // Get event link from same card if present
         const link = card.querySelector('a[href*="event"], a[href*="ticket"], a[href*="#/"]');
@@ -216,7 +217,9 @@ async function fetchEventsFromTazkarti() {
       })
       .filter((ev) => {
         const t = (ev.title || '').trim();
-        return t && !/^STADIUM\s*LOCATIONS$/i.test(t) && !/^Cairo\s*Opera\s*House$/i.test(t);
+        if (!t) return false;
+        // Only return events whose title contains a date (real events have "19-February 2026" etc.; nav items don't)
+        return /\d{1,2}[-/]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*[-/]?\s*\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}/i.test(t);
       });
 
     return normalized;
