@@ -66,9 +66,9 @@ async function fetchEventsFromTazkarti() {
       const result = [];
       const seenTitles = new Set();
 
-      // Strategy 1: Find cards that contain "Prices From" or "EGP" (event price line on tazkarti)
       const pricePattern = /Prices?\s*From|^\s*\d+\s*EGP|\d+\s*ج\.م|EGP/i;
       const datePattern = /\d{1,2}[-/]\w+[-/]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}|(?:يناير|فبراير|مارس|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)|February|January|March|April|May|June|July|August|September|October|November|December/i;
+      const buyTicketsPattern = /Buy\s*Tickets|شراء\s*التذاكر/i;
 
       function getCardRoot(el) {
         let node = el;
@@ -76,24 +76,47 @@ async function fetchEventsFromTazkarti() {
           const text = node.innerText || '';
           const hasPrice = pricePattern.test(text);
           const hasDate = datePattern.test(text);
-          if (hasPrice && hasDate && (text.length > 80 && text.length < 3000)) return node;
+          const hasBuyTickets = buyTicketsPattern.test(text);
+          if (hasPrice && hasDate && hasBuyTickets && (text.length > 80 && text.length < 3000)) return node;
           node = node.parentElement;
         }
         return null;
       }
 
-      // Collect all elements that contain price-like text
       const allElements = document.querySelectorAll('*');
-      const cardRoots = new Set();
+      const cardRootsSet = new Set();
       allElements.forEach((el) => {
         const text = (el.innerText || '').trim();
         if (text.length < 80 || text.length > 4000) return;
-        if (!pricePattern.test(text) || !datePattern.test(text)) return;
+        if (!pricePattern.test(text) || !datePattern.test(text) || !buyTicketsPattern.test(text)) return;
         const root = getCardRoot(el);
-        if (root) cardRoots.add(root);
+        if (root) cardRootsSet.add(root);
       });
 
-      cardRoots.forEach((card, idx) => {
+      const cardRoots = Array.from(cardRootsSet);
+      if (cardRoots.length === 0) return result;
+
+      // Find the "main event list" container: the ancestor that contains the most cards.
+      // The page shows only one list of events; nav/footer have at most 1 fake card each.
+      let bestContainer = null;
+      let bestCount = 0;
+      cardRoots.forEach((card) => {
+        let node = card.parentElement;
+        for (let i = 0; i < 20 && node; i++) {
+          const count = cardRoots.filter((c) => node.contains(c)).length;
+          if (count > bestCount && count <= cardRoots.length) {
+            bestCount = count;
+            bestContainer = node;
+          }
+          node = node.parentElement;
+        }
+      });
+
+      const mainListCards = bestContainer
+        ? cardRoots.filter((c) => bestContainer.contains(c))
+        : cardRoots;
+
+      mainListCards.forEach((card, idx) => {
         const text = (card.innerText || '').trim();
         const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
 
@@ -113,22 +136,16 @@ async function fetchEventsFromTazkarti() {
           if (/Main Hall|Small Theatre|Theatre|Opera|Cairo|المسرح|دار الأوبرا/i.test(line) && line.length < 80) locationStr = line;
         }
 
-        // Prefer English title: usually first long line that isn't a date and isn't "Buy Tickets"
         for (const line of lines) {
           if (line.length < 10 || line.length > 180) continue;
-          if (/Buy Tickets|Clear Search|Search|Event Name|Event Category|Event date/i.test(line)) continue;
+          if (/Buy Tickets|Clear Search|Search|Event Name|Event Category|Event date|شراء/i.test(line)) continue;
           if (datePattern.test(line) && line.length < 30) continue;
           if (/^\d+\s*EGP/i.test(line)) continue;
-          if (/^STADIUM\s*LOCATIONS$/i.test(line) || /^Cairo\s*Opera\s*House$/i.test(line)) continue;
           title = line;
           break;
         }
         if (!title) title = lines[0] || 'Event';
-        // Only keep real events: tazkarti event titles include the date (e.g. "Concert 19-February 2026")
-        const titleHasDate = /\d{1,2}[-/]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*[-/]?\s*\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}/i.test(title);
-        if (!titleHasDate) return;
 
-        // Get event link from same card if present
         const link = card.querySelector('a[href*="event"], a[href*="ticket"], a[href*="#/"]');
         if (link) {
           const href = link.getAttribute('href') || '';
@@ -156,14 +173,13 @@ async function fetchEventsFromTazkarti() {
         });
       });
 
-      // Strategy 2: Fallback - any link with href containing event
       if (result.length === 0) {
         document.querySelectorAll('a[href*="event"], a[href*="#/"]').forEach((a) => {
           const href = a.getAttribute('href') || '';
           const fullUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
           const card = a.closest('div, li, article') || a.parentElement;
           const text = (card ? card.innerText : a.innerText) || '';
-          if (text.length < 30) return;
+          if (text.length < 30 || !buyTicketsPattern.test(text)) return;
           const title = (a.textContent || text.split('\n')[0] || 'Event').trim().substring(0, 200);
           const titleKey = title.toLowerCase();
           if (seenTitles.has(titleKey)) return;
@@ -215,12 +231,7 @@ async function fetchEventsFromTazkarti() {
           isBookmarked: false,
         };
       })
-      .filter((ev) => {
-        const t = (ev.title || '').trim();
-        if (!t) return false;
-        // Only return events whose title contains a date (real events have "19-February 2026" etc.; nav items don't)
-        return /\d{1,2}[-/]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*[-/]?\s*\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}/i.test(t);
-      });
+      );
 
     return normalized;
   } catch (err) {
