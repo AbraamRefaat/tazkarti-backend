@@ -119,10 +119,13 @@ async function fetchEventsFromTazkarti() {
           if (/Buy Tickets|Clear Search|Search|Event Name|Event Category|Event date/i.test(line)) continue;
           if (datePattern.test(line) && line.length < 30) continue;
           if (/^\d+\s*EGP/i.test(line)) continue;
+          if (/^STADIUM\s*LOCATIONS$/i.test(line) || /^Cairo\s*Opera\s*House$/i.test(line)) continue;
           title = line;
           break;
         }
         if (!title) title = lines[0] || 'Event';
+        // Skip cards that are clearly nav/header (not real event titles)
+        if (/^STADIUM\s*LOCATIONS$/i.test(title) || /^Cairo\s*Opera\s*House$/i.test(title)) return;
 
         // Get event link from same card if present
         const link = card.querySelector('a[href*="event"], a[href*="ticket"], a[href*="#/"]');
@@ -193,23 +196,28 @@ async function fetchEventsFromTazkarti() {
     await browser.close();
 
     const now = new Date();
-    const normalized = events.map((ev) => {
-      const startDate = parseDateFromText(ev.startDate) || ev.startDate;
-      const price = typeof ev.price === 'number' ? ev.price : parsePrice(ev.price);
-      return {
-        id: ev.id,
-        title: ev.title,
-        description: ev.description || '',
-        location: ev.location || '',
-        startDate: startDate || now.toISOString(),
-        time: ev.time || null,
-        imageUrl: ev.imageUrl || null,
-        eventUrl: ev.eventUrl,
-        category: ev.category || 'Music',
-        price: price,
-        isBookmarked: false,
-      };
-    });
+    const normalized = events
+      .map((ev) => {
+        const startDate = parseDateFromText(ev.startDate) || ev.startDate;
+        const price = typeof ev.price === 'number' ? ev.price : parsePrice(ev.price);
+        return {
+          id: ev.id,
+          title: ev.title,
+          description: ev.description || '',
+          location: ev.location || '',
+          startDate: startDate || now.toISOString(),
+          time: ev.time || null,
+          imageUrl: ev.imageUrl || null,
+          eventUrl: ev.eventUrl,
+          category: ev.category || 'Music',
+          price: price,
+          isBookmarked: false,
+        };
+      })
+      .filter((ev) => {
+        const t = (ev.title || '').trim();
+        return t && !/^STADIUM\s*LOCATIONS$/i.test(t) && !/^Cairo\s*Opera\s*House$/i.test(t);
+      });
 
     return normalized;
   } catch (err) {
