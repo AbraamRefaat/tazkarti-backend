@@ -16,6 +16,13 @@ let cache = { data: null, timestamp: null };
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Scraper timeout')), ms)),
+  ]).catch((err) => (fallback !== undefined ? Promise.resolve(fallback) : Promise.reject(err)));
+}
+
 function parsePrice(text) {
   if (!text || typeof text !== 'string') return null;
   const match = text.replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
@@ -60,7 +67,7 @@ async function fetchEventsFromTazkarti() {
     });
 
     // Wait for SPA to render event list (tazkarti loads content via JS)
-    await delay(6000);
+    await delay(4000);
 
     const events = await page.evaluate((baseUrl) => {
       const result = [];
@@ -241,6 +248,14 @@ async function fetchEventsFromTazkarti() {
   }
 }
 
+function safeJson(res, status, body) {
+  try {
+    res.status(status).json(body);
+  } catch (e) {
+    res.status(500).end(JSON.stringify({ success: false, error: 'Response failed', events: [] }));
+  }
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -253,7 +268,7 @@ module.exports = async (req, res) => {
   try {
     const now = Date.now();
     if (cache.data && cache.timestamp && now - cache.timestamp < CACHE_TTL_MS) {
-      return res.status(200).json({
+      return safeJson(res, 200, {
         success: true,
         cached: true,
         count: cache.data.length,
@@ -262,11 +277,11 @@ module.exports = async (req, res) => {
       });
     }
 
-    const events = await fetchEventsFromTazkarti();
+    const events = await withTimeout(fetchEventsFromTazkarti(), 52000);
     cache.data = events;
     cache.timestamp = now;
 
-    return res.status(200).json({
+    return safeJson(res, 200, {
       success: true,
       cached: false,
       count: events.length,
@@ -275,11 +290,13 @@ module.exports = async (req, res) => {
     });
   } catch (error) {
     console.error('API error:', error);
-    return res.status(500).json({
+    // Return 200 with empty events so app gets valid JSON and can show "no events" instead of crash
+    return safeJson(res, 200, {
       success: false,
       error: 'Failed to fetch events',
-      message: error.message,
+      message: error.message || 'Scraper error',
       events: [],
+      count: 0,
     });
   }
 };
