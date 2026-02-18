@@ -84,9 +84,7 @@ async function fetchEvents() {
         imageUrl: ev.eventPhoto
           ? `${TAZKARTI_IMAGE_BASE}${ev.eventPhoto}`
           : null,
-        eventUrl: showId
-          ? `https://www.tazkarti.com/#/entertainment/shows/${ev.id}`
-          : TAZKARTI_EVENT_BASE,
+        eventUrl: `https://www.tazkarti.com/#/e/${ev.id}`,
         category: 'Music',
         price: ev.minimumPrice != null
           ? Number(ev.minimumPrice)
